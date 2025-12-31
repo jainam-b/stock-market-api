@@ -14,17 +14,17 @@ const app = express();
 const PORT = process.env.PORT || 3002;
 
 // Configure logger
-// const logger = winston.createLogger({
-//   level: 'info',
-//   format: winston.format.combine(
-//     winston.format.timestamp(),
-//     winston.format.json()
-//   ),
-//   transports: [
-//     // new winston.transports.Console(),
-//     // new winston.transports.File({ filename: 'highlow-job.log' })
-//   ]
-// });
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console(),
+    new winston.transports.File({ filename: 'highlow-job.log' })
+  ]
+});
 
 // Configure Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -469,27 +469,26 @@ async function runHighLowJob() {
   return results;
 }
 
-// PRODUCTION SCHEDULE (COMMENTED OUT FOR TESTING)
-// Set up scheduled job - 3:35 PM IST every weekday (Monday to Friday)
-// IST is UTC+5:30, so 3:35 PM IST is 10:05 AM UTC
+// PRODUCTION SCHEDULE - 3:30 PM IST every weekday (Monday to Friday)
+// IST is UTC+5:30, so 3:30 PM IST is 10:00 AM UTC
 // Cron format: minute hour day month day-of-week
-// For 3:35 PM IST = 15:35 IST = 10:05 UTC = minute=5, hour=10
-const productionSchedule = cron.schedule('5 10 * * 1-5', async () => {
+// For 3:30 PM IST = 15:30 IST = 10:00 UTC = minute=0, hour=10
+const productionSchedule = cron.schedule('0 10 * * 1-5', async () => {
   try {
     const now = new Date();
     const istTime = new Date(now.getTime() + (5.5 * 60 * 60 * 1000)); // Convert to IST
-    logger.info(`Running scheduled 52-week high/low job at ${istTime.toISOString()} IST (${now.toISOString()} UTC)`);
+    logger.info(`[PRODUCTION] Running scheduled 52-week high/low job at ${istTime.toISOString()} IST (${now.toISOString()} UTC)`);
     await runHighLowJob();
-    logger.info('Scheduled job completed');
+    logger.info('[PRODUCTION] Scheduled job completed');
   } catch (error) {
-    logger.error('Error in scheduled job:', error);
+    logger.error('[PRODUCTION] Error in scheduled job:', error);
   }
 }, {
-  scheduled: false, // Start as disabled for testing
+  scheduled: false, // Will be enabled based on NODE_ENV
   timezone: "UTC"
 });
 
-// TESTING SCHEDULE - Runs every minute (CURRENTLY ACTIVE)
+// TESTING SCHEDULE - Runs every minute
 const testingSchedule = cron.schedule('* * * * *', async () => {
   try {
     const now = new Date();
@@ -501,9 +500,20 @@ const testingSchedule = cron.schedule('* * * * *', async () => {
     logger.error('[TEST MODE] Error in scheduled job:', error);
   }
 }, {
-  scheduled: true, // Currently active for testing
+  scheduled: false, // Will be enabled based on NODE_ENV
   timezone: "UTC"
 });
+
+// Determine which schedule to use based on environment
+const isProduction = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
+
+if (isProduction) {
+  productionSchedule.start();
+  logger.info('🚀 PRODUCTION MODE: Schedule enabled - Job will run at 3:30 PM IST on weekdays');
+} else {
+  testingSchedule.start();
+  logger.info('🧪 TESTING MODE: Schedule enabled - Job will run every minute');
+}
 
 // API endpoint to manually trigger the job
 app.get('/run-highlow-job', async (req, res) => {
@@ -568,9 +578,11 @@ app.post('/enable-testing-schedule', (req, res) => {
 app.get('/schedule-status', (req, res) => {
   const now = new Date();
   const istTime = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
   
   res.json({
     status: 'success',
+    environment: isProduction ? 'production' : 'development',
     currentTime: {
       utc: now.toISOString(),
       ist: istTime.toISOString()
@@ -578,13 +590,15 @@ app.get('/schedule-status', (req, res) => {
     schedules: {
       production: {
         active: productionSchedule.getStatus() === 'scheduled',
-        schedule: '5 10 * * 1-5 (3:35 PM IST weekdays)',
-        description: 'Runs at 3:35 PM IST on weekdays'
+        schedule: '0 10 * * 1-5 (3:30 PM IST weekdays)',
+        description: 'Runs at 3:30 PM IST on weekdays',
+        autoEnabled: isProduction
       },
       testing: {
         active: testingSchedule.getStatus() === 'scheduled',
         schedule: '* * * * * (every minute)',
-        description: 'Runs every minute for testing'
+        description: 'Runs every minute for testing',
+        autoEnabled: !isProduction
       }
     }
   });
@@ -599,11 +613,18 @@ app.get('/health', (req, res) => {
 app.listen(PORT, () => {
   const now = new Date();
   const istTime = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
   
   logger.info(`Server is running on port ${PORT}`);
+  logger.info(`Environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
   logger.info(`Current time: ${now.toISOString()} UTC | ${istTime.toISOString()} IST`);
-  logger.info(`[TEST MODE] Testing schedule is ACTIVE - job runs every minute`);
-  logger.info(`[PRODUCTION] Production schedule is DISABLED - would run at 3:35 PM IST weekdays`);
+  
+  if (isProduction) {
+    logger.info(`✅ PRODUCTION schedule is ACTIVE - job runs at 3:30 PM IST weekdays`);
+  } else {
+    logger.info(`🧪 TESTING schedule is ACTIVE - job runs every minute`);
+  }
+  
   logger.info(`Available endpoints:`);
   logger.info(`  GET  /health - Health check`);
   logger.info(`  GET  /run-highlow-job - Manual job trigger`);

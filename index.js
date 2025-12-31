@@ -1272,6 +1272,148 @@ app.get("/option-chain", async (req, res) => {
   }
 });
 
+// API endpoint to get high/low data for stocks
+app.get("/api/stocks/highlow", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("stock_highlow")
+      .select("*")
+      .eq("is_active", true)
+      .order("symbol", { ascending: true });
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to fetch high/low data",
+        details: error.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: data || [],
+      count: data ? data.length : 0,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch high/low data",
+      details: error.message,
+    });
+  }
+});
+
+// API endpoint to add new stock instruments
+app.post("/api/stocks/add", async (req, res) => {
+  try {
+    const { instruments } = req.body;
+
+    if (!instruments || !Array.isArray(instruments)) {
+      return res.status(400).json({
+        success: false,
+        error: "instruments array is required. Format: [{ instrument_key, company_name, symbol, exchange, sector }]",
+      });
+    }
+
+    const results = {
+      added: [],
+      failed: [],
+      skipped: [],
+    };
+
+    for (const instrument of instruments) {
+      try {
+        const { instrument_key, company_name, symbol, exchange, sector } = instrument;
+
+        if (!instrument_key) {
+          results.failed.push({ instrument, error: "instrument_key is required" });
+          continue;
+        }
+
+        // Check if instrument already exists
+        const { data: existing } = await supabase
+          .from("stock_instruments")
+          .select("id")
+          .eq("instrument_key", instrument_key)
+          .maybeSingle();
+
+        if (existing) {
+          results.skipped.push({ instrument_key, reason: "Already exists" });
+          continue;
+        }
+
+        // Add new instrument
+        const { data, error } = await supabase
+          .from("stock_instruments")
+          .insert({
+            instrument_key,
+            company_name: company_name || "Unknown",
+            symbol: symbol || instrument_key.split("|")[1] || "N/A",
+            exchange: exchange || instrument_key.split("|")[0] || "N/A",
+            sector: sector || null,
+            is_active: true,
+          })
+          .select()
+          .single();
+
+        if (error) {
+          results.failed.push({ instrument_key, error: error.message });
+        } else {
+          results.added.push(data);
+        }
+      } catch (error) {
+        results.failed.push({ instrument, error: error.message });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Added ${results.added.length} instruments`,
+      results,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: "Failed to add instruments",
+      details: error.message,
+    });
+  }
+});
+
+// API endpoint to get all stock instruments
+app.get("/api/stocks/instruments", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("stock_instruments")
+      .select("*")
+      .eq("is_active", true)
+      .order("symbol", { ascending: true });
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to fetch instruments",
+        details: error.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: data || [],
+      count: data ? data.length : 0,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch instruments",
+      details: error.message,
+    });
+  }
+});
+
 // Start server and initialize
 (async () => {
   try {

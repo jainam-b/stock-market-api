@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock High/Low Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        h1 {
+            font-size: 24px;
+            margin-bottom: 20px;
+            color: #2c3e50;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #007bff;
+            color: white;
+        }
+        button:hover { background: #0056b3; transform: translateY(-1px); }
+        button:active { transform: translateY(0); }
+        .stats {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            flex: 1;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #dee2e6;
+        }
+        th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+            position: sticky;
+            top: 0;
+        }
+        tr:hover {
+            background: #f8f9fa;
+        }
+        .price {
+            font-weight: 600;
+            font-family: monospace;
+        }
+        .high { color: #28a745; }
+        .low { color: #dc3545; }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        .empty {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        .timestamp {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Stock 52-Week High/Low Data</h1>
+        
+        <div class="controls">
+            <button onclick="loadData()">🔄 Refresh Data</button>
+            <button onclick="runJob()">▶️ Run High/Low Job</button>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="totalStocks">-</div>
+                <div class="stat-label">Total Stocks</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="lastUpdate">-</div>
+                <div class="stat-label">Last Updated</div>
+            </div>
+        </div>
+
+        <div id="error" class="error" style="display: none;"></div>
+        <div id="loading" class="loading" style="display: none;">Loading data...</div>
+        
+        <table id="dataTable" style="display: none;">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Symbol</th>
+                    <th>Company Name</th>
+                    <th>Exchange</th>
+                    <th>52w High</th>
+                    <th>52w Low</th>
+                    <th>Updated</th>
+                </tr>
+            </thead>
+            <tbody id="tableBody"></tbody>
+        </table>
+
+        <div id="empty" class="empty" style="display: none;">
+            No data available. Click "Run High/Low Job" to fetch data.
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:3000';
+
+        async function loadData() {
+            try {
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('error').style.display = 'none';
+                document.getElementById('dataTable').style.display = 'none';
+                document.getElementById('empty').style.display = 'none';
+
+                const response = await fetch(`${API_URL}/api/stocks/highlow`);
+                const result = await response.json();
+
+                document.getElementById('loading').style.display = 'none';
+
+                if (!result.success) {
+                    throw new Error(result.error || 'Failed to fetch data');
+                }
+
+                if (result.data.length === 0) {
+                    document.getElementById('empty').style.display = 'block';
+                    document.getElementById('totalStocks').textContent = '0';
+                    document.getElementById('lastUpdate').textContent = '-';
+                    return;
+                }
+
+                // Update stats
+                document.getElementById('totalStocks').textContent = result.count;
+                document.getElementById('lastUpdate').textContent = new Date(result.timestamp).toLocaleTimeString();
+
+                // Populate table
+                const tbody = document.getElementById('tableBody');
+                tbody.innerHTML = '';
+
+                result.data.forEach((stock, index) => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${index + 1}</td>
+                        <td><strong>${stock.symbol || 'N/A'}</strong></td>
+                        <td>${stock.name || stock.company_name || 'Unknown'}</td>
+                        <td>${stock.exchange || 'N/A'}</td>
+                        <td class="price high">₹${stock.high ? stock.high.toFixed(2) : 'N/A'}</td>
+                        <td class="price low">₹${stock.low ? stock.low.toFixed(2) : 'N/A'}</td>
+                        <td class="timestamp">${new Date(stock.updated_at).toLocaleString()}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+
+                document.getElementById('dataTable').style.display = 'table';
+
+            } catch (error) {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').textContent = `Error: ${error.message}`;
+                document.getElementById('error').style.display = 'block';
+            }
+        }
+
+        async function runJob() {
+            try {
+                if (!confirm('This will fetch 52-week high/low data for all active stocks. Continue?')) {
+                    return;
+                }
+
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('error').style.display = 'none';
+
+                const response = await fetch('http://localhost:3002/run-highlow-job');
+                const result = await response.json();
+
+                document.getElementById('loading').style.display = 'none';
+
+                if (result.status === 'success') {
+                    alert(`Job completed!\nSuccessful: ${result.results.successful.length}\nFailed: ${result.results.failed.length}`);
+                    loadData();
+                } else {
+                    throw new Error(result.message || 'Job failed');
+                }
+
+            } catch (error) {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').textContent = `Error: ${error.message}`;
+                document.getElementById('error').style.display = 'block';
+            }
+        }
+
+        // Auto-load data on page load
+        window.addEventListener('load', loadData);
+
+        // Auto-refresh every 30 seconds
+        setInterval(loadData, 30000);
+    </script>
+</body>
+</html>
