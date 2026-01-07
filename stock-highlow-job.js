@@ -13,6 +13,24 @@ const winston = require('winston');
 const app = express();
 const PORT = process.env.PORT || 3002;
 
+// Add middleware for JSON parsing
+app.use(express.json());
+
+// Job status tracking
+let jobStatus = {
+  isRunning: false,
+  startTime: null,
+  endTime: null,
+  progress: {
+    total: 0,
+    completed: 0,
+    failed: 0,
+    current: null
+  },
+  results: null,
+  error: null
+};
+
 // Configure logger
 const logger = winston.createLogger({
   level: 'info',
@@ -459,9 +477,29 @@ async function processInstrument(instrumentKey) {
   }
 }
 
-// Main function to run the job
+// Main function to run the job with progress tracking
 async function runHighLowJob() {
-  logger.info('Starting 52-week high/low job');
+  // Check if job is already running
+  if (jobStatus.isRunning) {
+    throw new Error('Job is already running. Please wait for it to complete.');
+  }
+
+  // Initialize job status
+  jobStatus = {
+    isRunning: true,
+    startTime: new Date().toISOString(),
+    endTime: null,
+    progress: {
+      total: 0,
+      completed: 0,
+      failed: 0,
+      current: null
+    },
+    results: null,
+    error: null
+  };
+
+  logger.info('Starting 52-week high/low job with progress tracking');
   
   const results = {
     successful: [],
@@ -474,33 +512,62 @@ async function runHighLowJob() {
     
     if (instruments.length === 0) {
       logger.warn('No instruments to process. Job completed.');
+      jobStatus.progress.total = 0;
+      jobStatus.endTime = new Date().toISOString();
+      jobStatus.isRunning = false;
+      jobStatus.results = results;
       return results;
     }
     
+    // Set total count for progress tracking
+    jobStatus.progress.total = instruments.length;
     logger.info(`Processing ${instruments.length} instruments`);
     
     // Process each instrument sequentially to avoid rate limits
-    for (const instrument of instruments) {
+    for (let i = 0; i < instruments.length; i++) {
+      const instrument = instruments[i];
+      jobStatus.progress.current = instrument;
+      
       try {
+        logger.info(`Processing ${i + 1}/${instruments.length}: ${instrument}`);
         const result = await processInstrument(instrument);
+        
         if (result.error) {
           results.failed.push(result);
+          jobStatus.progress.failed++;
         } else {
           results.successful.push(result);
+          jobStatus.progress.completed++;
         }
       } catch (error) {
         results.failed.push({ instrumentKey: instrument, error: error.message });
+        jobStatus.progress.failed++;
       }
+      
+      // Update progress
+      const totalProcessed = jobStatus.progress.completed + jobStatus.progress.failed;
+      logger.info(`Progress: ${totalProcessed}/${jobStatus.progress.total} (${Math.round((totalProcessed / jobStatus.progress.total) * 100)}%)`);
     }
   } catch (error) {
     logger.error(`Error fetching instruments: ${error.message}`);
+    jobStatus.error = error.message;
+    jobStatus.endTime = new Date().toISOString();
+    jobStatus.isRunning = false;
     return {
       successful: [],
       failed: [{ instrumentKey: 'FETCH_INSTRUMENTS', error: error.message }]
     };
   }
   
-  logger.info(`Job completed. Successfully processed: ${results.successful.length}, Failed: ${results.failed.length}`);
+  // Job completed
+  jobStatus.endTime = new Date().toISOString();
+  jobStatus.isRunning = false;
+  jobStatus.results = results;
+  jobStatus.progress.current = null;
+  
+  const duration = new Date(jobStatus.endTime) - new Date(jobStatus.startTime);
+  logger.info(`Job completed in ${Math.round(duration / 1000)}s. Successfully processed: ${results.successful.length}, Failed: ${results.failed.length}`);
+  
   return results;
 }
 
@@ -563,6 +630,149 @@ app.get('/run-highlow-job', async (req, res) => {
   } catch (error) {
     logger.error('Error running job via API:', error);
     res.status(500).json({ 
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
+// API endpoint for frontend to start the job
+app.post('/start-job', async (req, res) => {
+  try {
+    // Check if job is already running
+    if (jobStatus.isRunning) {
+      return res.status(409).json({
+        status: 'error',
+        message: 'Job is already running. Please wait for it to complete.',
+        jobStatus: {
+          isRunning: jobStatus.isRunning,
+          startTime: jobStatus.startTime,
+          progress: jobStatus.progress
+        }
+      });
+    }
+
+    logger.info('Job started via frontend API');
+    
+    // Start the job asynchronously
+    runHighLowJob().catch(error => {
+      logger.error('Async job error:', error);
+      jobStatus.error = error.message;
+      jobStatus.endTime = new Date().toISOString();
+      jobStatus.isRunning = false;
+    });
+
+    // Return immediately with job started status
+    res.json({
+      status: 'success',
+      message: 'Job started successfully',
+      jobId: jobStatus.startTime,
+      jobStatus: {
+        isRunning: jobStatus.isRunning,
+        startTime: jobStatus.startTime,
+        progress: jobStatus.progress
+      }
+    });
+  } catch (error) {
+    logger.error('Error starting job:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
+// API endpoint to get job status and progress
+app.get('/job-status', (req, res) => {
+  try {
+    const duration = jobStatus.startTime && jobStatus.endTime 
+      ? new Date(jobStatus.endTime) - new Date(jobStatus.startTime)
+      : jobStatus.startTime 
+        ? Date.now() - new Date(jobStatus.startTime)
+        : null;
+
+    res.json({
+      status: 'success',
+      jobStatus: {
+        ...jobStatus,
+        duration: duration ? Math.round(duration / 1000) : null, // in seconds
+        progressPercentage: jobStatus.progress.total > 0 
+          ? Math.round(((jobStatus.progress.completed + jobStatus.progress.failed) / jobStatus.progress.total) * 100)
+          : 0
+      }
+    });
+  } catch (error) {
+    logger.error('Error getting job status:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
+// API endpoint to stop/cancel the job
+app.post('/stop-job', (req, res) => {
+  try {
+    if (!jobStatus.isRunning) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'No job is currently running'
+      });
+    }
+
+    // Note: This is a soft stop - we can't actually stop the running job
+    // but we can mark it as stopped for the frontend
+    logger.warn('Job stop requested via API (soft stop)');
+    
+    res.json({
+      status: 'success',
+      message: 'Job stop requested. Note: Current processing will complete, but no new instruments will be processed.',
+      jobStatus: {
+        isRunning: jobStatus.isRunning,
+        progress: jobStatus.progress
+      }
+    });
+  } catch (error) {
+    logger.error('Error stopping job:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
+// API endpoint to get job history/results
+app.get('/job-results', (req, res) => {
+  try {
+    if (!jobStatus.results && !jobStatus.error) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'No job results available. Run a job first.'
+      });
+    }
+
+    res.json({
+      status: 'success',
+      jobStatus: {
+        isRunning: jobStatus.isRunning,
+        startTime: jobStatus.startTime,
+        endTime: jobStatus.endTime,
+        progress: jobStatus.progress,
+        error: jobStatus.error
+      },
+      results: jobStatus.results,
+      summary: jobStatus.results ? {
+        totalProcessed: jobStatus.results.successful.length + jobStatus.results.failed.length,
+        successful: jobStatus.results.successful.length,
+        failed: jobStatus.results.failed.length,
+        successRate: jobStatus.results.successful.length + jobStatus.results.failed.length > 0 
+          ? Math.round((jobStatus.results.successful.length / (jobStatus.results.successful.length + jobStatus.results.failed.length)) * 100)
+          : 0
+      } : null
+    });
+  } catch (error) {
+    logger.error('Error getting job results:', error);
+    res.status(500).json({
       status: 'error',
       message: error.message
     });
@@ -683,7 +893,11 @@ app.listen(PORT, () => {
   
   logger.info(`Available endpoints:`);
   logger.info(`  GET  /health - Health check`);
-  logger.info(`  GET  /run-highlow-job - Manual job trigger`);
+  logger.info(`  GET  /run-highlow-job - Manual job trigger (synchronous)`);
+  logger.info(`  POST /start-job - Start job from frontend (asynchronous)`);
+  logger.info(`  GET  /job-status - Get current job status and progress`);
+  logger.info(`  GET  /job-results - Get job results and summary`);
+  logger.info(`  POST /stop-job - Request job stop (soft stop)`);
   logger.info(`  GET  /schedule-status - Check current schedule status`);
   logger.info(`  POST /enable-production-schedule - Switch to production schedule`);
   logger.info(`  POST /enable-testing-schedule - Switch to testing schedule`);

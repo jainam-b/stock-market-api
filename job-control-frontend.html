@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock High/Low Job Control</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 14px;
+        }
+        .button:hover {
+            background-color: #0056b3;
+        }
+        .button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .button.danger {
+            background-color: #dc3545;
+        }
+        .button.danger:hover {
+            background-color: #c82333;
+        }
+        .button.success {
+            background-color: #28a745;
+        }
+        .button.success:hover {
+            background-color: #218838;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .status.running {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .status.completed {
+            background-color: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background-color: #007bff;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .log {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 10px 0;
+        }
+        .stat-card {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .stat-number {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #6c757d;
+            text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+    <h1>Stock High/Low Job Control Panel</h1>
+    
+    <div class="container">
+        <h2>Job Control</h2>
+        <button id="startBtn" class="button success">Start Job</button>
+        <button id="stopBtn" class="button danger" disabled>Stop Job</button>
+        <button id="refreshBtn" class="button">Refresh Status</button>
+        <button id="resultsBtn" class="button">View Results</button>
+    </div>
+
+    <div class="container">
+        <h2>Job Status</h2>
+        <div id="jobStatus" class="status">
+            Click "Refresh Status" to check current job status
+        </div>
+        
+        <div id="progressContainer" style="display: none;">
+            <div class="progress-bar">
+                <div id="progressFill" class="progress-fill" style="width: 0%;">0%</div>
+            </div>
+            <div id="progressText"></div>
+        </div>
+
+        <div id="statsContainer" style="display: none;">
+            <div class="stats">
+                <div class="stat-card">
+                    <div id="totalStat" class="stat-number">0</div>
+                    <div class="stat-label">Total</div>
+                </div>
+                <div class="stat-card">
+                    <div id="completedStat" class="stat-number">0</div>
+                    <div class="stat-label">Completed</div>
+                </div>
+                <div class="stat-card">
+                    <div id="failedStat" class="stat-number">0</div>
+                    <div class="stat-label">Failed</div>
+                </div>
+                <div class="stat-card">
+                    <div id="durationStat" class="stat-number">0s</div>
+                    <div class="stat-label">Duration</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>Activity Log</h2>
+        <div id="activityLog" class="log">Ready to start job...</div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:3000'; // Updated to use port 3000
+        let statusInterval = null;
+
+        // DOM elements
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const resultsBtn = document.getElementById('resultsBtn');
+        const jobStatus = document.getElementById('jobStatus');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
+        const progressText = document.getElementById('progressText');
+        const statsContainer = document.getElementById('statsContainer');
+        const activityLog = document.getElementById('activityLog');
+
+        // Utility functions
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            activityLog.textContent += `[${timestamp}] ${message}\n`;
+            activityLog.scrollTop = activityLog.scrollHeight;
+        }
+
+        function updateStats(jobData) {
+            if (jobData.progress) {
+                document.getElementById('totalStat').textContent = jobData.progress.total || 0;
+                document.getElementById('completedStat').textContent = jobData.progress.completed || 0;
+                document.getElementById('failedStat').textContent = jobData.progress.failed || 0;
+                document.getElementById('durationStat').textContent = jobData.duration ? `${jobData.duration}s` : '0s';
+            }
+        }
+
+        function updateProgress(jobData) {
+            if (jobData.progress && jobData.progress.total > 0) {
+                const percentage = jobData.progressPercentage || 0;
+                progressFill.style.width = `${percentage}%`;
+                progressFill.textContent = `${percentage}%`;
+                
+                const processed = (jobData.progress.completed || 0) + (jobData.progress.failed || 0);
+                progressText.textContent = `Processing: ${processed}/${jobData.progress.total} instruments`;
+                
+                if (jobData.progress.current) {
+                    progressText.textContent += ` | Current: ${jobData.progress.current}`;
+                }
+                
+                progressContainer.style.display = 'block';
+                statsContainer.style.display = 'block';
+            } else {
+                progressContainer.style.display = 'none';
+                statsContainer.style.display = 'none';
+            }
+        }
+
+        function updateJobStatus(jobData) {
+            if (jobData.isRunning) {
+                jobStatus.className = 'status running';
+                jobStatus.textContent = `Job is running... Started at ${new Date(jobData.startTime).toLocaleString()}`;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                
+                updateProgress(jobData);
+                updateStats(jobData);
+                
+                // Auto-refresh while running
+                if (!statusInterval) {
+                    statusInterval = setInterval(refreshStatus, 2000);
+                }
+            } else if (jobData.endTime) {
+                jobStatus.className = jobData.error ? 'status error' : 'status completed';
+                const duration = jobData.duration ? ` (${jobData.duration}s)` : '';
+                jobStatus.textContent = jobData.error 
+                    ? `Job failed: ${jobData.error}`
+                    : `Job completed at ${new Date(jobData.endTime).toLocaleString()}${duration}`;
+                
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                
+                updateProgress(jobData);
+                updateStats(jobData);
+                
+                // Stop auto-refresh
+                if (statusInterval) {
+                    clearInterval(statusInterval);
+                    statusInterval = null;
+                }
+            } else {
+                jobStatus.className = 'status';
+                jobStatus.textContent = 'No job has been run yet';
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                progressContainer.style.display = 'none';
+                statsContainer.style.display = 'none';
+            }
+        }
+
+        // API functions
+        async function startJob() {
+            try {
+                log('Starting job...');
+                const response = await fetch(`${API_BASE}/start-job`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    log('Job started successfully');
+                    updateJobStatus(data.jobStatus);
+                } else {
+                    log(`Error starting job: ${data.message}`);
+                }
+            } catch (error) {
+                log(`Error starting job: ${error.message}`);
+            }
+        }
+
+        async function stopJob() {
+            try {
+                log('Stopping job...');
+                const response = await fetch(`${API_BASE}/stop-job`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const data = await response.json();
+                log(data.message);
+            } catch (error) {
+                log(`Error stopping job: ${error.message}`);
+            }
+        }
+
+        async function refreshStatus() {
+            try {
+                const response = await fetch(`${API_BASE}/job-status`);
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    updateJobStatus(data.jobStatus);
+                }
+            } catch (error) {
+                log(`Error refreshing status: ${error.message}`);
+            }
+        }
+
+        async function viewResults() {
+            try {
+                log('Fetching job results...');
+                const response = await fetch(`${API_BASE}/job-results`);
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    const summary = data.summary;
+                    log(`Results: ${summary.successful} successful, ${summary.failed} failed (${summary.successRate}% success rate)`);
+                    
+                    // You can expand this to show detailed results
+                    console.log('Detailed results:', data.results);
+                } else {
+                    log(`No results available: ${data.message}`);
+                }
+            } catch (error) {
+                log(`Error fetching results: ${error.message}`);
+            }
+        }
+
+        // Event listeners
+        startBtn.addEventListener('click', startJob);
+        stopBtn.addEventListener('click', stopJob);
+        refreshBtn.addEventListener('click', refreshStatus);
+        resultsBtn.addEventListener('click', viewResults);
+
+        // Initialize
+        log('Job control panel loaded');
+        refreshStatus();
+    </script>
+</body>
+</html>

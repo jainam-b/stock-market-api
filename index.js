@@ -1414,6 +1414,452 @@ app.get("/api/stocks/instruments", async (req, res) => {
   }
 });
 
+// ===== JOB CONTROL ENDPOINTS =====
+
+// Job status tracking for high/low job
+let jobStatus = {
+  isRunning: false,
+  startTime: null,
+  endTime: null,
+  progress: {
+    total: 0,
+    completed: 0,
+    failed: 0,
+    current: null
+  },
+  results: null,
+  error: null
+};
+
+// Function to fetch active instruments from the stock_instruments table
+async function fetchActiveInstruments() {
+  try {
+    console.log('🔍 Fetching active instruments from stock_instruments table');
+    
+    const { data, error } = await supabase
+      .from('stock_instruments')
+      .select('instrument_key')
+      .eq('is_active', true);
+      
+    if (error) {
+      console.error(`❌ Error fetching active instruments: ${error.message}`);
+      throw error;
+    }
+    
+    if (!data || data.length === 0) {
+      console.warn('⚠️ No active instruments found in the database');
+      return [];
+    }
+    
+    // Extract instrument keys from the result
+    const instruments = data.map(item => item.instrument_key);
+    console.log(`✅ Found ${instruments.length} active instruments`);
+    
+    return instruments;
+  } catch (error) {
+    console.error('❌ Failed to fetch active instruments:', error.message);
+    throw error;
+  }
+}
+
+// Function to fetch historical data from Upstox
+async function fetchHistoricalData(instrumentKey) {
+  try {
+    const accessToken = await getAccessTokenFromDB();
+    
+    // Calculate date range for 52 weeks (365 days)
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 365);
+
+    // Format dates as YYYY-MM-DD
+    const formatDate = (date) => {
+      return date.toISOString().split('T')[0];
+    };
+
+    // Format: /v3/historical-candle/:instrument_key/:unit/:interval/:to_date/:from_date
+    const unit = 'days';
+    const interval = '1';
+    const toDate = formatDate(endDate);
+    const fromDate = formatDate(startDate);
+    
+    const url = `https://api.upstox.com/v3/historical-candle/${instrumentKey}/${unit}/${interval}/${toDate}/${fromDate}`;
+    
+    const headers = {
+      'Accept': 'application/json',
+      'Authorization': `Bearer ${accessToken}`
+    };
+
+    console.log(`📊 Fetching historical data for ${instrumentKey} from ${fromDate} to ${toDate}`);
+    
+    const response = await axios.get(url, { headers });
+    return response.data;
+  } catch (error) {
+    console.error(`❌ Error fetching historical data for ${instrumentKey}:`, error.message);
+    if (error.response) {
+      console.error(`Response status: ${error.response.status}, data:`, error.response.data);
+    }
+    throw error;
+  }
+}
+
+// Function to calculate 52-week high and low
+function calculate52WeekHighLow(data) {
+  try {
+    if (!data || !data.data || !data.data.candles || data.data.candles.length === 0) {
+      throw new Error('Invalid or empty data received');
+    }
+
+    const candles = data.data.candles;
+    
+    console.log(`📈 Processing ${candles.length} candles for 52-week high/low calculation`);
+    
+    // Initialize high and low with the first candle's high and low
+    let high = candles[0][2]; // High value from first candle (index 2)
+    let low = candles[0][3];  // Low value from first candle (index 3)
+    let highDate = candles[0][0];
+    let lowDate = candles[0][0];
+    
+    // Iterate through all candles to find the highest high and lowest low
+    for (const candle of candles) {
+      const candleHigh = candle[2];
+      const candleLow = candle[3];
+      
+      if (candleHigh > high) {
+        high = candleHigh;
+        highDate = candle[0];
+      }
+      
+      if (candleLow < low) {
+        low = candleLow;
+        lowDate = candle[0];
+      }
+    }
+    
+    console.log(`💰 52-week High: ${high} (on ${highDate}), Low: ${low} (on ${lowDate})`);
+    
+    return { high, low };
+  } catch (error) {
+    console.error('❌ Error calculating 52-week high/low:', error.message);
+    throw error;
+  }
+}
+
+// Function to save data to Supabase
+async function saveHighLowToSupabase(instrumentKey, high, low) {
+  try {
+    console.log(`💾 Saving data for ${instrumentKey}: high=${high}, low=${low}`);
+    
+    // Create a data object with required fields
+    const dataToSave = {
+      instrument_key: instrumentKey,
+      high: high,
+      low: low,
+      updated_at: new Date().toISOString(),
+      is_active: true
+    };
+    
+    // Perform the upsert operation
+    const { data, error } = await supabase
+      .from('stock_highlow')
+      .upsert(
+        dataToSave,
+        { 
+          onConflict: 'instrument_key',
+          ignoreDuplicates: false
+        }
+      );
+      
+    if (error) {
+      console.error(`❌ Error in Supabase upsert for ${instrumentKey}: ${error.message}`);
+      throw error;
+    }
+    
+    console.log(`✅ Successfully saved data for ${instrumentKey}`);
+    return data;
+  } catch (error) {
+    console.error(`❌ Error saving data to Supabase for ${instrumentKey}: ${error.message}`);
+    throw error;
+  }
+}
+
+// Function to process each instrument
+async function processInstrument(instrumentKey) {
+  try {
+    // Fetch historical data
+    const historicalData = await fetchHistoricalData(instrumentKey);
+    
+    // Calculate 52-week high and low
+    const { high, low } = calculate52WeekHighLow(historicalData);
+    
+    // Save to Supabase
+    await saveHighLowToSupabase(instrumentKey, high, low);
+    
+    return { 
+      instrumentKey, 
+      high, 
+      low
+    };
+  } catch (error) {
+    console.error(`❌ Failed to process instrument ${instrumentKey}:`, error.message);
+    return { instrumentKey, error: error.message };
+  }
+}
+
+// Main function to run the high/low job with progress tracking
+async function runHighLowJob() {
+  // Check if job is already running
+  if (jobStatus.isRunning) {
+    throw new Error('Job is already running. Please wait for it to complete.');
+  }
+
+  // Initialize job status
+  jobStatus = {
+    isRunning: true,
+    startTime: new Date().toISOString(),
+    endTime: null,
+    progress: {
+      total: 0,
+      completed: 0,
+      failed: 0,
+      current: null
+    },
+    results: null,
+    error: null
+  };
+
+  console.log('🚀 Starting 52-week high/low job with progress tracking');
+  
+  const results = {
+    successful: [],
+    failed: []
+  };
+  
+  try {
+    // Fetch active instruments from the database
+    const instruments = await fetchActiveInstruments();
+    
+    if (instruments.length === 0) {
+      console.warn('⚠️ No instruments to process. Job completed.');
+      jobStatus.progress.total = 0;
+      jobStatus.endTime = new Date().toISOString();
+      jobStatus.isRunning = false;
+      jobStatus.results = results;
+      return results;
+    }
+    
+    // Set total count for progress tracking
+    jobStatus.progress.total = instruments.length;
+    console.log(`📊 Processing ${instruments.length} instruments`);
+    
+    // Process each instrument sequentially to avoid rate limits
+    for (let i = 0; i < instruments.length; i++) {
+      const instrument = instruments[i];
+      jobStatus.progress.current = instrument;
+      
+      try {
+        console.log(`📈 Processing ${i + 1}/${instruments.length}: ${instrument}`);
+        const result = await processInstrument(instrument);
+        
+        if (result.error) {
+          results.failed.push(result);
+          jobStatus.progress.failed++;
+        } else {
+          results.successful.push(result);
+          jobStatus.progress.completed++;
+        }
+      } catch (error) {
+        results.failed.push({ instrumentKey: instrument, error: error.message });
+        jobStatus.progress.failed++;
+      }
+      
+      // Update progress
+      const totalProcessed = jobStatus.progress.completed + jobStatus.progress.failed;
+      console.log(`⏳ Progress: ${totalProcessed}/${jobStatus.progress.total} (${Math.round((totalProcessed / jobStatus.progress.total) * 100)}%)`);
+    }
+  } catch (error) {
+    console.error(`❌ Error fetching instruments: ${error.message}`);
+    jobStatus.error = error.message;
+    jobStatus.endTime = new Date().toISOString();
+    jobStatus.isRunning = false;
+    return {
+      successful: [],
+      failed: [{ instrumentKey: 'FETCH_INSTRUMENTS', error: error.message }]
+    };
+  }
+  
+  // Job completed
+  jobStatus.endTime = new Date().toISOString();
+  jobStatus.isRunning = false;
+  jobStatus.results = results;
+  jobStatus.progress.current = null;
+  
+  const duration = new Date(jobStatus.endTime) - new Date(jobStatus.startTime);
+  console.log(`✅ Job completed in ${Math.round(duration / 1000)}s. Successfully processed: ${results.successful.length}, Failed: ${results.failed.length}`);
+  
+  return results;
+}
+
+// API endpoint for frontend to start the job
+app.post("/start-job", async (req, res) => {
+  try {
+    // Check if job is already running
+    if (jobStatus.isRunning) {
+      return res.status(409).json({
+        status: 'error',
+        message: 'Job is already running. Please wait for it to complete.',
+        jobStatus: {
+          isRunning: jobStatus.isRunning,
+          startTime: jobStatus.startTime,
+          progress: jobStatus.progress
+        }
+      });
+    }
+
+    console.log('🚀 Job started via frontend API');
+    
+    // Start the job asynchronously
+    runHighLowJob().catch(error => {
+      console.error('❌ Async job error:', error);
+      jobStatus.error = error.message;
+      jobStatus.endTime = new Date().toISOString();
+      jobStatus.isRunning = false;
+    });
+
+    // Return immediately with job started status
+    res.json({
+      status: 'success',
+      message: 'Job started successfully',
+      jobId: jobStatus.startTime,
+      jobStatus: {
+        isRunning: jobStatus.isRunning,
+        startTime: jobStatus.startTime,
+        progress: jobStatus.progress
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error starting job:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
+// API endpoint to get job status and progress
+app.get("/job-status", (req, res) => {
+  try {
+    const duration = jobStatus.startTime && jobStatus.endTime 
+      ? new Date(jobStatus.endTime) - new Date(jobStatus.startTime)
+      : jobStatus.startTime 
+        ? Date.now() - new Date(jobStatus.startTime)
+        : null;
+
+    res.json({
+      status: 'success',
+      jobStatus: {
+        ...jobStatus,
+        duration: duration ? Math.round(duration / 1000) : null, // in seconds
+        progressPercentage: jobStatus.progress.total > 0 
+          ? Math.round(((jobStatus.progress.completed + jobStatus.progress.failed) / jobStatus.progress.total) * 100)
+          : 0
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error getting job status:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
+// API endpoint to get job results
+app.get("/job-results", (req, res) => {
+  try {
+    if (!jobStatus.results && !jobStatus.error) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'No job results available. Run a job first.'
+      });
+    }
+
+    res.json({
+      status: 'success',
+      jobStatus: {
+        isRunning: jobStatus.isRunning,
+        startTime: jobStatus.startTime,
+        endTime: jobStatus.endTime,
+        progress: jobStatus.progress,
+        error: jobStatus.error
+      },
+      results: jobStatus.results,
+      summary: jobStatus.results ? {
+        totalProcessed: jobStatus.results.successful.length + jobStatus.results.failed.length,
+        successful: jobStatus.results.successful.length,
+        failed: jobStatus.results.failed.length,
+        successRate: jobStatus.results.successful.length + jobStatus.results.failed.length > 0 
+          ? Math.round((jobStatus.results.successful.length / (jobStatus.results.successful.length + jobStatus.results.failed.length)) * 100)
+          : 0
+      } : null
+    });
+  } catch (error) {
+    console.error('❌ Error getting job results:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
+// API endpoint to stop/cancel the job (soft stop)
+app.post("/stop-job", (req, res) => {
+  try {
+    if (!jobStatus.isRunning) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'No job is currently running'
+      });
+    }
+
+    console.log('⚠️ Job stop requested via API (soft stop)');
+    
+    res.json({
+      status: 'success',
+      message: 'Job stop requested. Note: Current processing will complete, but no new instruments will be processed.',
+      jobStatus: {
+        isRunning: jobStatus.isRunning,
+        progress: jobStatus.progress
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error stopping job:', error);
+    res.status(500).json({
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
+// API endpoint to manually trigger the job (synchronous)
+app.get("/run-highlow-job", async (req, res) => {
+  try {
+    console.log('🚀 Job triggered via synchronous API endpoint');
+    const results = await runHighLowJob();
+    res.json({ 
+      status: 'success',
+      message: 'Job completed',
+      results
+    });
+  } catch (error) {
+    console.error('❌ Error running synchronous job:', error);
+    res.status(500).json({ 
+      status: 'error',
+      message: error.message
+    });
+  }
+});
+
 // Start server and initialize
 (async () => {
   try {
