@@ -155,6 +155,8 @@ async function fetchHistoricalData(instrumentKey) {
 }
 
 // Function to calculate 52-week high and low
+// Upstox candle format: [timestamp, open, high, low, close, volume, oi]
+// Indices:              [0,         1,    2,    3,   4,     5,      6]
 function calculate52WeekHighLow(data) {
   try {
     if (!data || !data.data || !data.data.candles || data.data.candles.length === 0) {
@@ -163,9 +165,18 @@ function calculate52WeekHighLow(data) {
 
     const candles = data.data.candles;
     
+    logger.info(`Processing ${candles.length} candles for 52-week high/low calculation`);
+    
+    // Log first candle to verify data structure
+    if (candles.length > 0) {
+      logger.info(`Sample candle: timestamp=${candles[0][0]}, open=${candles[0][1]}, high=${candles[0][2]}, low=${candles[0][3]}, close=${candles[0][4]}`);
+    }
+    
     // Initialize high and low with the first candle's high and low
-    let high = candles[0][2]; // High value from first candle
-    let low = candles[0][3];  // Low value from first candle
+    let high = candles[0][2]; // High value from first candle (index 2)
+    let low = candles[0][3];  // Low value from first candle (index 3)
+    let highDate = candles[0][0];
+    let lowDate = candles[0][0];
     
     // Iterate through all candles to find the highest high and lowest low
     for (const candle of candles) {
@@ -174,12 +185,16 @@ function calculate52WeekHighLow(data) {
       
       if (candleHigh > high) {
         high = candleHigh;
+        highDate = candle[0];
       }
       
       if (candleLow < low) {
         low = candleLow;
+        lowDate = candle[0];
       }
     }
+    
+    logger.info(`52-week High: ${high} (on ${highDate}), Low: ${low} (on ${lowDate})`);
     
     return { high, low };
   } catch (error) {
@@ -326,6 +341,20 @@ async function saveToSupabase(instrumentKey, high, low, stockInfo) {
     }
     
     logger.info(`Successfully saved data for ${instrumentKey}`);
+    
+    // DEBUG: Verify what was actually saved by reading it back
+    const { data: verifyData, error: verifyError } = await supabase
+      .from('stock_highlow')
+      .select('instrument_key, high, low, updated_at')
+      .eq('instrument_key', instrumentKey)
+      .single();
+    
+    if (verifyError) {
+      logger.warn(`[DEBUG] Could not verify saved data: ${verifyError.message}`);
+    } else {
+      logger.info(`[DEBUG] Verified saved data for ${instrumentKey}: HIGH=${verifyData.high}, LOW=${verifyData.low}, updated_at=${verifyData.updated_at}`);
+    }
+    
     return data;
   } catch (error) {
     logger.error(`Error saving data to Supabase for ${instrumentKey}: ${error.message}`);
@@ -396,6 +425,9 @@ async function processInstrument(instrumentKey) {
     // Calculate 52-week high and low
     const { high, low } = calculate52WeekHighLow(historicalData);
     
+    // DEBUG: Log the calculated values before saving
+    logger.info(`[DEBUG] Calculated values for ${instrumentKey}: HIGH=${high}, LOW=${low}`);
+    
     // Fetch additional stock information
     const stockInfo = await fetchStockInformation(instrumentKey);
     
@@ -407,7 +439,10 @@ async function processInstrument(instrumentKey) {
     }
     
     // Save to Supabase with the additional information
-    await saveToSupabase(instrumentKey, high, low, stockInfo);
+    const saveResult = await saveToSupabase(instrumentKey, high, low, stockInfo);
+    
+    // DEBUG: Log the save result
+    logger.info(`[DEBUG] Save result for ${instrumentKey}:`, JSON.stringify(saveResult));
     
     return { 
       instrumentKey, 
@@ -470,10 +505,10 @@ async function runHighLowJob() {
 }
 
 // PRODUCTION SCHEDULE - 3:30 PM IST every weekday (Monday to Friday)
-// IST is UTC+5:30, so 3:30 PM IST is 10:00 AM UTC
+// IST is UTC+5:30, so 3:30 PM IST is 9:30 AM UTC
 // Cron format: minute hour day month day-of-week
-// For 3:30 PM IST = 15:30 IST = 10:00 UTC = minute=0, hour=10
-const productionSchedule = cron.schedule('0 10 * * 1-5', async () => {
+// For 3:30 PM IST = 15:30 IST = 9:30 UTC = minute=30, hour=9
+const productionSchedule = cron.schedule('30 9 * * 1-5', async () => {
   try {
     const now = new Date();
     const istTime = new Date(now.getTime() + (5.5 * 60 * 60 * 1000)); // Convert to IST
@@ -515,10 +550,10 @@ if (isProduction) {
   logger.info('🧪 TESTING MODE: Schedule enabled - Job will run every minute');
 }
 
-// API endpoint to manually trigger the job
+// API endpoint to manually trigger the job (can be called by AWS EventBridge)
 app.get('/run-highlow-job', async (req, res) => {
   try {
-    logger.info('Manually triggered 52-week high/low job');
+    logger.info('Job triggered via API endpoint (manual or AWS EventBridge)');
     const results = await runHighLowJob();
     res.json({ 
       status: 'success',
@@ -526,10 +561,31 @@ app.get('/run-highlow-job', async (req, res) => {
       results
     });
   } catch (error) {
-    logger.error('Error running manual job:', error);
+    logger.error('Error running job via API:', error);
     res.status(500).json({ 
       status: 'error',
       message: error.message
+    });
+  }
+});
+
+// API endpoint for AWS EventBridge health check
+app.get('/health-job', async (req, res) => {
+  try {
+    // Quick health check without running the full job
+    const accessToken = await getAccessTokenFromDB();
+    res.json({ 
+      status: 'healthy',
+      message: 'Job service is ready',
+      hasValidToken: !!accessToken,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Health check failed:', error);
+    res.status(500).json({ 
+      status: 'unhealthy',
+      message: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 });
