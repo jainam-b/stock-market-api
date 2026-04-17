@@ -1514,16 +1514,35 @@ function calculate52WeekHighLow(data) {
     
     console.log(`📈 Processing ${candles.length} candles for 52-week high/low calculation`);
     
+    // Log first few candles to verify data structure
+    if (candles.length > 0) {
+      console.log(`🔍 Sample candles (first 3):`);
+      for (let i = 0; i < Math.min(3, candles.length); i++) {
+        const candle = candles[i];
+        console.log(`  Candle ${i}: timestamp=${candle[0]}, open=${candle[1]}, high=${candle[2]}, low=${candle[3]}, close=${candle[4]}, volume=${candle[5]}`);
+      }
+    }
+    
     // Initialize high and low with the first candle's high and low
     let high = candles[0][2]; // High value from first candle (index 2)
     let low = candles[0][3];  // Low value from first candle (index 3)
     let highDate = candles[0][0];
     let lowDate = candles[0][0];
     
+    // Track current price (most recent close)
+    const currentPrice = candles[candles.length - 1][4]; // Close price of last candle
+    
     // Iterate through all candles to find the highest high and lowest low
     for (const candle of candles) {
       const candleHigh = candle[2];
       const candleLow = candle[3];
+      
+      // Validate that high/low values are reasonable numbers
+      if (typeof candleHigh !== 'number' || typeof candleLow !== 'number' || 
+          candleHigh <= 0 || candleLow <= 0 || candleHigh < candleLow) {
+        console.warn(`⚠️ Invalid candle data: high=${candleHigh}, low=${candleLow}, timestamp=${candle[0]}`);
+        continue;
+      }
       
       if (candleHigh > high) {
         high = candleHigh;
@@ -1536,9 +1555,27 @@ function calculate52WeekHighLow(data) {
       }
     }
     
-    console.log(`💰 52-week High: ${high} (on ${highDate}), Low: ${low} (on ${lowDate})`);
+    // Validation: Check if the calculated high/low makes sense
+    const highFromCurrent = ((high - currentPrice) / currentPrice) * 100;
+    const lowFromCurrent = ((currentPrice - low) / low) * 100;
     
-    return { high, low };
+    console.log(`💰 52-week High: ${high} (on ${new Date(highDate).toDateString()})`);
+    console.log(`💰 52-week Low: ${low} (on ${new Date(lowDate).toDateString()})`);
+    console.log(`📊 Current Price: ${currentPrice}`);
+    console.log(`📈 High is ${highFromCurrent.toFixed(1)}% above current price`);
+    console.log(`📉 Current is ${lowFromCurrent.toFixed(1)}% above low`);
+    
+    // Warning if the high seems too far from current price (more than 500% difference)
+    if (Math.abs(highFromCurrent) > 500) {
+      console.warn(`⚠️ WARNING: 52-week high (${high}) seems unusually far from current price (${currentPrice}). Please verify data.`);
+    }
+    
+    // Warning if low is higher than current (shouldn't happen)
+    if (low > currentPrice) {
+      console.warn(`⚠️ WARNING: 52-week low (${low}) is higher than current price (${currentPrice}). Data may be incorrect.`);
+    }
+    
+    return { high, low, currentPrice };
   } catch (error) {
     console.error('❌ Error calculating 52-week high/low:', error.message);
     throw error;
